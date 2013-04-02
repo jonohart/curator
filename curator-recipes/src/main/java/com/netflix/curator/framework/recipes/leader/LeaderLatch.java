@@ -384,7 +384,7 @@ public class LeaderLatch implements Closeable
                 @Override
                 public void processResult(CuratorFramework client, CuratorEvent event) throws Exception
                 {
-                    if ( (state.get() == State.STARTED) && (event.getResultCode() == KeeperException.Code.NONODE.intValue()) )
+                    if ( event.getResultCode() == KeeperException.Code.NONODE.intValue() )
                     {
                         // previous node is gone - reset
                         reset();
@@ -402,7 +402,7 @@ public class LeaderLatch implements Closeable
             @Override
             public void processResult(CuratorFramework client, CuratorEvent event) throws Exception
             {
-                if ( (state.get() == State.STARTED) && (event.getResultCode() == KeeperException.Code.OK.intValue()) )
+                if ( event.getResultCode() == KeeperException.Code.OK.intValue() )
                 {
                     checkLeadership(event.getChildren());
                 }
