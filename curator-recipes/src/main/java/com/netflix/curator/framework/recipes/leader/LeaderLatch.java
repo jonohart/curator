@@ -130,7 +130,7 @@ public class LeaderLatch implements Closeable
      * @throws IOException errors
      */
     @Override
-    public void close() throws IOException
+    public synchronized void close() throws IOException
     {
         Preconditions.checkState(state.compareAndSet(State.STARTED, State.CLOSED), "Already closed or has not been started");
 
@@ -313,8 +313,13 @@ public class LeaderLatch implements Closeable
     volatile CountDownLatch debugResetWaitLatch = null;
 
     @VisibleForTesting
-    void reset() throws Exception
+    synchronized void reset() throws Exception
     {
+	if ( state.get() != State.STARTED )
+	{
+	    return;
+	}
+
         setLeadership(false);
         setNode(null);
 
@@ -330,8 +335,18 @@ public class LeaderLatch implements Closeable
                 }
 
                 if ( event.getResultCode() == KeeperException.Code.OK.intValue() )
-                {
-                    setNode(event.getName());
+		{
+		    synchronized ( LeaderLatch.this )
+		    {
+			setNode(event.getName());
+
+			if ( state.get() != State.STARTED )
+			{
+			    setNode(null);
+			    return;
+			}
+		    }
+                    
                     getChildren();
                 }
                 else

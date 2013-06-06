@@ -71,6 +71,34 @@ public class TestLeaderLatch extends BaseClassForTests
             Closeables.closeQuietly(client);
         }
     }
+    
+    @Test
+    public void testCloseAndResetRace() throws Exception
+    {
+    	Timing timing = new Timing();
+        LeaderLatch latch = null;
+        CuratorFramework client = CuratorFrameworkFactory.newClient(server.getConnectString(), timing.session(), timing.connection(), new RetryOneTime(1));
+        try
+        {
+            client.start();
+            latch = new LeaderLatch(client, PATH_NAME);
+            
+            latch.start();
+            
+            timing.sleepABit();
+            
+            latch.close();
+            
+            timing.sleepABit();
+            
+            Assert.assertEquals(client.getChildren().forPath(PATH_NAME).size(), 0);
+        }
+        finally
+        {
+            Closeables.closeQuietly(latch);
+            Closeables.closeQuietly(client);
+        }
+    }
 
     @Test
     public void testLostConnection() throws Exception
