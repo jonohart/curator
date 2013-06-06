@@ -16,6 +16,29 @@
 
 package com.netflix.curator.framework.recipes.leader;
 
+import java.io.Closeable;
+import java.io.EOFException;
+import java.io.IOException;
+import java.util.Collection;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.zookeeper.CreateMode;
+import org.apache.zookeeper.KeeperException;
+import org.apache.zookeeper.WatchedEvent;
+import org.apache.zookeeper.Watcher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.netflix.curator.framework.CuratorFramework;
@@ -27,21 +50,6 @@ import com.netflix.curator.framework.recipes.locks.StandardLockInternalsDriver;
 import com.netflix.curator.framework.state.ConnectionState;
 import com.netflix.curator.framework.state.ConnectionStateListener;
 import com.netflix.curator.utils.ZKPaths;
-import org.apache.zookeeper.CreateMode;
-import org.apache.zookeeper.KeeperException;
-import org.apache.zookeeper.WatchedEvent;
-import org.apache.zookeeper.Watcher;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import java.io.Closeable;
-import java.io.EOFException;
-import java.io.IOException;
-import java.util.Collection;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * <p>
@@ -53,7 +61,7 @@ import java.util.concurrent.atomic.AtomicReference;
  */
 public class LeaderLatch implements Closeable
 {
-    private final Logger                                log = LoggerFactory.getLogger(getClass());
+    private static final Logger                         log = LoggerFactory.getLogger(LeaderLatch.class);
     private final CuratorFramework                      client;
     private final String                                latchPath;
     private final String                                id;
@@ -61,6 +69,30 @@ public class LeaderLatch implements Closeable
     private final AtomicBoolean                         hasLeadership = new AtomicBoolean(false);
     private final AtomicReference<String>               ourPath = new AtomicReference<String>();
 
+    private Set<LeaderLatchListener> listeners = new CopyOnWriteArraySet<LeaderLatchListener>();
+    
+    private static final BlockingQueue<LeaderLatchEvent>	events = new LinkedBlockingQueue<LeaderLatchEvent>();
+    private static final ExecutorService					executorService = Executors.newSingleThreadExecutor();
+    //private Future<?> 										eventDispatcher;
+    
+    private static class QueueManager{
+    	public QueueManager(){
+    		executorService.execute
+    	        	(
+    	        		new Runnable()
+    	        		{
+    	        			@Override
+    	        			public void run()
+    	        			{
+    	        				dispatchEvents();
+    	        			}
+    	        		}
+    	        	);
+    	}
+    }
+    @SuppressWarnings("unused")
+    private static final QueueManager queueManager = new QueueManager();
+    
     private final ConnectionStateListener               listener = new ConnectionStateListener()
     {
         @Override
@@ -107,6 +139,9 @@ public class LeaderLatch implements Closeable
         this.client = Preconditions.checkNotNull(client, "client cannot be null");
         this.latchPath = Preconditions.checkNotNull(latchPath, "mutexPath cannot be null");
         this.id = Preconditions.checkNotNull(id, "id cannot be null");
+        
+        //this.executorService = Executors.newSingleThreadExecutor(defaultThreadFactory);
+        //this.executorService = Executors.newSingleThreadExecutor();
     }
 
     /**
@@ -119,6 +154,9 @@ public class LeaderLatch implements Closeable
         Preconditions.checkState(state.compareAndSet(State.LATENT, State.STARTED), "Cannot be started more than once");
 
         client.getConnectionStateListenable().addListener(listener);
+        //executorService.execute
+        
+        
         reset();
     }
 
@@ -145,6 +183,8 @@ public class LeaderLatch implements Closeable
         finally
         {
             client.getConnectionStateListenable().removeListener(listener);
+            //eventDispatcher.cancel(true);
+            executorService.shutdown();
             setLeadership(false);
         }
     }
@@ -308,6 +348,18 @@ public class LeaderLatch implements Closeable
     {
         return (state.get() == State.STARTED) && hasLeadership.get();
     }
+    
+    public void addListener(LeaderLatchListener l){
+    	listeners.add(l);
+    }
+    
+    public void removeListener(LeaderLatchListener l){
+    	listeners.remove(l);
+    }
+    
+    public void removeAllListeners(){
+    	listeners.clear();
+    }
 
     @VisibleForTesting
     volatile CountDownLatch debugResetWaitLatch = null;
@@ -315,11 +367,14 @@ public class LeaderLatch implements Closeable
     @VisibleForTesting
     synchronized void reset() throws Exception
     {
-	if ( state.get() != State.STARTED )
-	{
-	    return;
-	}
-
+    	if ( state.get() != State.STARTED )
+    	{
+    		return;
+    	}
+    	
+    	//log.debug("Resetting node at {}", latchPath);
+    	//log.debug("Stack trace: ", new Throwable()); 
+    	
         setLeadership(false);
         setNode(null);
 
@@ -335,18 +390,18 @@ public class LeaderLatch implements Closeable
                 }
 
                 if ( event.getResultCode() == KeeperException.Code.OK.intValue() )
-		{
-		    synchronized ( LeaderLatch.this )
-		    {
-			setNode(event.getName());
-
-			if ( state.get() != State.STARTED )
-			{
-			    setNode(null);
-			    return;
-			}
-		    }
-                    
+                {
+                	synchronized ( LeaderLatch.this )
+                	{
+	                    setNode(event.getName());
+	                    
+	                    if ( state.get() != State.STARTED )
+	                    {
+	                    	setNode(null);
+	                    	return;
+	                    }
+                	}
+                	
                     getChildren();
                 }
                 else
@@ -399,7 +454,8 @@ public class LeaderLatch implements Closeable
                 @Override
                 public void processResult(CuratorFramework client, CuratorEvent event) throws Exception
                 {
-                    if ( event.getResultCode() == KeeperException.Code.NONODE.intValue() )
+                    //if ( (state.get() == State.STARTED) && (event.getResultCode() == KeeperException.Code.NONODE.intValue()) )
+                	if ( event.getResultCode() == KeeperException.Code.NONODE.intValue() )
                     {
                         // previous node is gone - reset
                         reset();
@@ -417,7 +473,8 @@ public class LeaderLatch implements Closeable
             @Override
             public void processResult(CuratorFramework client, CuratorEvent event) throws Exception
             {
-                if ( event.getResultCode() == KeeperException.Code.OK.intValue() )
+                //if ( (state.get() == State.STARTED) && (event.getResultCode() == KeeperException.Code.OK.intValue()) )
+            	if ( event.getResultCode() == KeeperException.Code.OK.intValue() )
                 {
                     checkLeadership(event.getChildren());
                 }
@@ -461,7 +518,17 @@ public class LeaderLatch implements Closeable
 
     private synchronized void setLeadership(boolean newValue)
     {
-        hasLeadership.set(newValue);
+        boolean oldValue = hasLeadership.getAndSet(newValue);
+        
+        if ( oldValue != newValue )
+        {
+        	/*
+	        for (LeaderLatchListener l : listeners){
+	        	l.leaderLatchEvent(client, new LeaderLatchEvent(newValue));
+	        }*/
+        	events.offer(new LeaderLatchEvent(this, client, newValue));
+        }
+        
         notifyAll();
     }
 
@@ -472,5 +539,30 @@ public class LeaderLatch implements Closeable
         {
             client.delete().guaranteed().inBackground().forPath(oldPath);
         }
+    }
+    
+    private static void dispatchEvents()
+    {
+    	while ( !Thread.currentThread().isInterrupted() )
+    	{
+    		try
+    		{
+    			LeaderLatchEvent event = events.take();
+    			
+    			for ( LeaderLatchListener l : event.getLatch().listeners )
+    			{
+    				l.leaderLatchEvent(event.getClient(), event);
+    			}
+    		}
+    		catch ( InterruptedException e )
+    		{
+    			Thread.currentThread().interrupt();
+    			break;
+    		}
+    		catch ( Exception e )
+    		{
+    			log.error("", e);
+    		}
+    	}
     }
 }
